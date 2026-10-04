@@ -5,7 +5,7 @@ import asyncio
 import discord
 import aiohttp
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 
 # ==========================================
 # 1. DISCORD BOT CONFIGURATION
@@ -22,8 +22,10 @@ bot_state = {
     "running": False,
     "channel_id": None,
     "webhook_url": None,
-    "min_delay": 30,  # Default minimum delay in seconds
-    "max_delay": 90,  # Default maximum delay in seconds
+    "min_delay": 30,
+    "max_delay": 90,
+    "min_usd": 15.0,   # Minimum trade value in USD
+    "max_usd": 150.0,  # Maximum trade value in USD
     "emojis": {
         "BTC": "🪙",
         "ETH": "🔹",
@@ -31,44 +33,72 @@ bot_state = {
     }
 }
 
-# Crypto configuration settings & colors
+# Base config & colors
 CRYPTO_CONFIG = {
     "ETH": {
         "color": 0x4562E6,
-        "min_crypto": 0.001,
-        "max_crypto": 0.05,
-        "usd_rate": 3400.0,
-        "tx_prefix": "0x"
+        "coingecko_id": "ethereum",
+        "fallback_rate": 3000.0,
+        "tx_prefix": "0x",
+        "decimals": 6
     },
     "LTC": {
         "color": 0x838383,
-        "min_crypto": 0.1,
-        "max_crypto": 2.5,
-        "usd_rate": 82.0,
-        "tx_prefix": ""
+        "coingecko_id": "litecoin",
+        "fallback_rate": 80.0,
+        "tx_prefix": "",
+        "decimals": 5
     },
     "BTC": {
         "color": 0xF7931A,
-        "min_crypto": 0.0001,
-        "max_crypto": 0.005,
-        "usd_rate": 62000.0,
-        "tx_prefix": ""
+        "coingecko_id": "bitcoin",
+        "fallback_rate": 65000.0,
+        "tx_prefix": "",
+        "decimals": 8
     }
 }
 
 # ==========================================
-# 2. HELPER FUNCTIONS & EMBED GENERATOR
+# 2. PRICE FETCHING & EMBED GENERATOR
 # ==========================================
+async def get_live_prices():
+    """Fetches real-time crypto USD rates from CoinGecko API."""
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,litecoin&vs_currencies=usd"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=5) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    return {
+                        "BTC": data.get("bitcoin", {}).get("usd", CRYPTO_CONFIG["BTC"]["fallback_rate"]),
+                        "ETH": data.get("ethereum", {}).get("usd", CRYPTO_CONFIG["ETH"]["fallback_rate"]),
+                        "LTC": data.get("litecoin", {}).get("usd", CRYPTO_CONFIG["LTC"]["fallback_rate"])
+                    }
+    except Exception as e:
+        print(f"Warning: Failed to fetch live prices, using fallbacks. Error: {e}")
+    
+    # Fallback to configured default rates if API call fails
+    return {
+        "BTC": CRYPTO_CONFIG["BTC"]["fallback_rate"],
+        "ETH": CRYPTO_CONFIG["ETH"]["fallback_rate"],
+        "LTC": CRYPTO_CONFIG["LTC"]["fallback_rate"]
+    }
+
 def generate_random_tx():
     part1 = secrets.token_hex(4)
     part2 = secrets.token_hex(4)
     return f"{part1}...{part2}"
 
-def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
+def build_trade_embed(guild: discord.Guild, crypto_type: str, live_rate: float) -> discord.Embed:
     cfg = CRYPTO_CONFIG[crypto_type]
     
-    amount = round(random.uniform(cfg["min_crypto"], cfg["max_crypto"]), 6)
-    usd_val = round(amount * cfg["usd_rate"], 2)
+    # Generate random target USD trade value
+    target_usd = round(random.uniform(bot_state["min_usd"], bot_state["max_usd"]), 2)
+    
+    # Calculate exact crypto amount from market conversion rate
+    crypto_amount = target_usd / live_rate
+    crypto_amount_fmt = f"{crypto_amount:.{cfg['decimals']}f}"
+    
     tx_id = f"{cfg['tx_prefix']}{generate_random_tx()}"
     
     non_bot_members = [m for m in guild.members if not m.bot]
@@ -83,7 +113,7 @@ def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
     
     embed.add_field(
         name="",
-        value=f"`{amount:.6f}` **{crypto_type}** (`${usd_val:,.2f} USD`)",
+        value=f"`{crypto_amount_fmt}` **{crypto_type}** (`${target_usd:,.2f} USD`)",
         inline=False
     )
     
@@ -113,10 +143,9 @@ def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
     
     return embed
 
-# Loop task to send trade embeds with random configurable delays
+# Loop task to send trade embeds using live market conversions
 async def embed_sender_loop():
     while bot_state["running"]:
-        # Pick random delay between min_delay and max_delay
         delay = random.randint(bot_state["min_delay"], bot_state["max_delay"])
         await asyncio.sleep(delay)
 
@@ -127,8 +156,13 @@ async def embed_sender_loop():
         if not channel:
             continue
 
+        # Fetch current market rates
+        prices = await get_live_prices()
+        
         crypto_choice = random.choice(["BTC", "ETH", "LTC"])
-        embed = build_trade_embed(channel.guild, crypto_choice)
+        live_rate = prices.get(crypto_choice, CRYPTO_CONFIG[crypto_choice]["fallback_rate"])
+        
+        embed = build_trade_embed(channel.guild, crypto_choice, live_rate)
         
         try:
             if bot_state["webhook_url"]:
@@ -140,7 +174,6 @@ async def embed_sender_loop():
         except Exception as e:
             print(f"Error sending embed: {e}")
 
-# Global reference to hold background sending task
 sender_task = None
 
 # ==========================================
@@ -150,7 +183,7 @@ sender_task = None
 async def on_ready():
     print(f"✅ Bot is logged in and online as {bot.user}")
 
-# $sync command (Message Prefix)
+# $sync command
 @bot.command(name="sync")
 async def prefix_sync(ctx: commands.Context, scope: str = "guild"):
     try:
@@ -166,7 +199,7 @@ async def prefix_sync(ctx: commands.Context, scope: str = "guild"):
     except Exception as e:
         await ctx.send(f"❌ Failed to sync: {e}")
 
-# /sync command (Slash Command)
+# /sync command
 @bot.tree.command(name="sync", description="Syncs slash commands and cleans up old ones")
 @app_commands.describe(scope="Sync scope: 'guild' (instant) or 'global'")
 async def slash_sync(interaction: discord.Interaction, scope: str = "guild"):
@@ -194,8 +227,10 @@ async def slash_sync(interaction: discord.Interaction, scope: str = "guild"):
 @bot.tree.command(name="start", description="Start sending trade completion embeds")
 @app_commands.describe(
     webhook_url="Optional Discord Webhook URL to send through",
-    min_delay_seconds="Minimum delay between embeds (default: 30s)",
-    max_delay_seconds="Maximum delay between embeds (default: 90s)",
+    min_delay_seconds="Minimum delay between embeds in seconds (default: 30)",
+    max_delay_seconds="Maximum delay between embeds in seconds (default: 90)",
+    min_usd="Minimum USD value for trade (default: 15.0)",
+    max_usd="Maximum USD value for trade (default: 150.0)",
     btc_emoji="Custom emoji for BTC",
     eth_emoji="Custom emoji for ETH",
     ltc_emoji="Custom emoji for LTC"
@@ -205,6 +240,8 @@ async def start_cmd(
     webhook_url: str = None,
     min_delay_seconds: int = 30,
     max_delay_seconds: int = 90,
+    min_usd: float = 15.0,
+    max_usd: float = 150.0,
     btc_emoji: str = None,
     eth_emoji: str = None,
     ltc_emoji: str = None
@@ -220,19 +257,21 @@ async def start_cmd(
 
     bot_state["min_delay"] = max(5, min_delay_seconds)
     bot_state["max_delay"] = max(bot_state["min_delay"], max_delay_seconds)
+    bot_state["min_usd"] = min_usd
+    bot_state["max_usd"] = max_usd
     bot_state["running"] = True
     bot_state["channel_id"] = interaction.channel_id
     bot_state["webhook_url"] = webhook_url
 
-    # Cancel previous running loop if any
     if sender_task and not sender_task.done():
         sender_task.cancel()
 
-    # Start new sender loop task
     sender_task = asyncio.create_task(embed_sender_loop())
 
     await interaction.response.send_message(
-        f"✅ Trade generator started!\n⏱️ Embeds will send randomly every **{bot_state['min_delay']}s** to **{bot_state['max_delay']}s**.",
+        f"✅ Trade generator started!\n"
+        f"⏱️ Delay: **{bot_state['min_delay']}s** to **{bot_state['max_delay']}s**\n"
+        f"💵 Value range: **${bot_state['min_usd']:.2f}** to **${bot_state['max_usd']:.2f} USD** (Calculated live)",
         ephemeral=True
     )
 
