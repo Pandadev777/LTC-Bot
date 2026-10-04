@@ -2,8 +2,8 @@ import os
 import random
 import secrets
 import threading
-import asyncio
 import discord
+import aiohttp
 from discord import app_commands
 from discord.ext import commands, tasks
 from flask import Flask
@@ -48,21 +48,21 @@ bot_state = {
 # Crypto configuration settings & colors
 CRYPTO_CONFIG = {
     "ETH": {
-        "color": 0x4562E6,  # Blue/Purple hue
+        "color": 0x4562E6,
         "min_crypto": 0.001,
         "max_crypto": 0.05,
         "usd_rate": 3400.0,
         "tx_prefix": "0x"
     },
     "LTC": {
-        "color": 0x838383,  # Silver/Grey hue
+        "color": 0x838383,
         "min_crypto": 0.1,
         "max_crypto": 2.5,
         "usd_rate": 82.0,
         "tx_prefix": ""
     },
     "BTC": {
-        "color": 0xF7931A,  # Orange hue
+        "color": 0xF7931A,
         "min_crypto": 0.0001,
         "max_crypto": 0.005,
         "usd_rate": 62000.0,
@@ -81,16 +81,13 @@ def generate_random_tx():
 def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
     cfg = CRYPTO_CONFIG[crypto_type]
     
-    # Generate random transaction amounts
     amount = round(random.uniform(cfg["min_crypto"], cfg["max_crypto"]), 6)
     usd_val = round(amount * cfg["usd_rate"], 2)
     tx_id = f"{cfg['tx_prefix']}{generate_random_tx()}"
     
-    # Fetch random member from guild
     non_bot_members = [m for m in guild.members if not m.bot]
     selected_member = random.choice(non_bot_members) if non_bot_members else guild.me
     
-    # Retrieve configured emoji
     emoji = bot_state["emojis"].get(crypto_type, "")
 
     embed = discord.Embed(
@@ -98,35 +95,30 @@ def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
         color=cfg["color"]
     )
     
-    # Amount Field
     embed.add_field(
         name="",
         value=f"`{amount:.6f}` **{crypto_type}** (`${usd_val:,.2f} USD`)",
         inline=False
     )
     
-    # Divider separator line simulated via field
     embed.add_field(
         name="───────────────",
         value="",
         inline=False
     )
     
-    # Sender
     embed.add_field(
         name="Sender",
         value="`[Anonymous]`",
         inline=False
     )
     
-    # Receiver
     embed.add_field(
         name="Receiver",
         value=f"{selected_member.mention}",
         inline=False
     )
     
-    # Transaction ID
     embed.add_field(
         name="Transaction ID",
         value=f"`{tx_id}`",
@@ -135,7 +127,7 @@ def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
     
     return embed
 
-# Loop to send randomized embeds every 30 to 120 seconds
+# Loop to send randomized embeds
 @tasks.loop(seconds=45)
 async def embed_sender_task():
     if not bot_state["running"] or not bot_state["channel_id"]:
@@ -145,12 +137,10 @@ async def embed_sender_task():
     if not channel:
         return
 
-    # Pick 1 of 3 types randomly
     crypto_choice = random.choice(["BTC", "ETH", "LTC"])
     embed = build_trade_embed(channel.guild, crypto_choice)
     
     try:
-        # Check if webhook URL is set; send via Webhook if available
         if bot_state["webhook_url"]:
             async with aiohttp.ClientSession() as session:
                 webhook = discord.Webhook.from_url(bot_state["webhook_url"], session=session)
@@ -166,11 +156,33 @@ async def embed_sender_task():
 @bot.event
 async def on_ready():
     print(f"Bot logged in as {bot.user}")
+
+# /sync command: Clears stale commands and re-syncs active ones
+@bot.tree.command(name="sync", description="Syncs slash commands and removes old/stale commands")
+@app_commands.describe(scope="Sync globally or just for this guild (guild/global)")
+async def sync_cmd(interaction: discord.Interaction, scope: str = "guild"):
+    await interaction.response.defer(ephemeral=True)
+    
     try:
-        synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s)")
+        if scope.lower() == "guild":
+            # Syncs commands specifically to current server (updates instantly)
+            bot.tree.copy_global_to(guild=interaction.guild)
+            synced = await bot.tree.sync(guild=interaction.guild)
+            await interaction.followup.send(
+                f"🔄 Guild sync complete! Removed old commands and registered **{len(synced)}** command(s) to this server.",
+                ephemeral=True
+            )
+        elif scope.lower() == "global":
+            # Syncs globally across all servers (takes up to 1 hour to propagate in Discord UI)
+            synced = await bot.tree.sync()
+            await interaction.followup.send(
+                f"🌐 Global sync complete! Registered **{len(synced)}** command(s) globally. (Note: Global changes can take up to an hour to show up).",
+                ephemeral=True
+            )
+        else:
+            await interaction.followup.send("Invalid scope! Please choose either `guild` or `global`.", ephemeral=True)
     except Exception as e:
-        print(f"Failed to sync commands: {e}")
+        await interaction.followup.send(f"❌ Failed to sync commands: {e}", ephemeral=True)
 
 @bot.tree.command(name="start", description="Start sending trade completion embeds")
 @app_commands.describe(
