@@ -1,35 +1,17 @@
 import os
 import random
 import secrets
-import threading
 import discord
 import aiohttp
 from discord import app_commands
 from discord.ext import commands, tasks
-from flask import Flask
 
 # ==========================================
-# 1. FLASK WEB SERVER (For Railway Health Check)
-# ==========================================
-app = Flask(__name__)
-
-@app.route('/')
-def home():
-    return "Bot is running online!"
-
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-# Start Flask on a separate background thread
-threading.Thread(target=run_flask, daemon=True).start()
-
-# ==========================================
-# 2. DISCORD BOT CONFIGURATION
+# 1. DISCORD BOT CONFIGURATION
 # ==========================================
 intents = discord.Intents.default()
 intents.guild_messages = True
-intents.members = True  # Required to select random server members
+intents.members = True  # Enable Server Members Intent in Developer Portal
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -71,7 +53,7 @@ CRYPTO_CONFIG = {
 }
 
 # ==========================================
-# 3. HELPER FUNCTIONS & EMBED GENERATOR
+# 2. HELPER FUNCTIONS & EMBED GENERATOR
 # ==========================================
 def generate_random_tx():
     part1 = secrets.token_hex(4)
@@ -127,7 +109,7 @@ def build_trade_embed(guild: discord.Guild, crypto_type: str) -> discord.Embed:
     
     return embed
 
-# Loop to send randomized embeds
+# Loop task to send trade embeds
 @tasks.loop(seconds=45)
 async def embed_sender_task():
     if not bot_state["running"] or not bot_state["channel_id"]:
@@ -151,45 +133,42 @@ async def embed_sender_task():
         print(f"Error sending embed: {e}")
 
 # ==========================================
-# 4. BOT SLASH COMMANDS
+# 3. BOT SLASH COMMANDS
 # ==========================================
 @bot.event
 async def on_ready():
-    print(f"Bot logged in as {bot.user}")
+    print(f"✅ Bot is logged in and online as {bot.user}")
 
-# /sync command: Clears stale commands and re-syncs active ones
-@bot.tree.command(name="sync", description="Syncs slash commands and removes old/stale commands")
-@app_commands.describe(scope="Sync globally or just for this guild (guild/global)")
+@bot.tree.command(name="sync", description="Syncs slash commands and cleans up old ones")
+@app_commands.describe(scope="Sync scope: 'guild' (instant) or 'global'")
 async def sync_cmd(interaction: discord.Interaction, scope: str = "guild"):
     await interaction.response.defer(ephemeral=True)
     
     try:
         if scope.lower() == "guild":
-            # Syncs commands specifically to current server (updates instantly)
             bot.tree.copy_global_to(guild=interaction.guild)
             synced = await bot.tree.sync(guild=interaction.guild)
             await interaction.followup.send(
-                f"🔄 Guild sync complete! Removed old commands and registered **{len(synced)}** command(s) to this server.",
+                f"🔄 Guild sync complete! Registered **{len(synced)}** active command(s).",
                 ephemeral=True
             )
         elif scope.lower() == "global":
-            # Syncs globally across all servers (takes up to 1 hour to propagate in Discord UI)
             synced = await bot.tree.sync()
             await interaction.followup.send(
-                f"🌐 Global sync complete! Registered **{len(synced)}** command(s) globally. (Note: Global changes can take up to an hour to show up).",
+                f"🌐 Global sync complete! Registered **{len(synced)}** command(s) globally.",
                 ephemeral=True
             )
         else:
-            await interaction.followup.send("Invalid scope! Please choose either `guild` or `global`.", ephemeral=True)
+            await interaction.followup.send("Please specify either `guild` or `global`.", ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ Failed to sync commands: {e}", ephemeral=True)
 
 @bot.tree.command(name="start", description="Start sending trade completion embeds")
 @app_commands.describe(
     webhook_url="Optional Discord Webhook URL to send through",
-    btc_emoji="Custom emoji for BTC (e.g. :btc:)",
-    eth_emoji="Custom emoji for ETH (e.g. :eth:)",
-    ltc_emoji="Custom emoji for LTC (e.g. :ltc:)"
+    btc_emoji="Custom emoji for BTC",
+    eth_emoji="Custom emoji for ETH",
+    ltc_emoji="Custom emoji for LTC"
 )
 async def start_cmd(
     interaction: discord.Interaction,
@@ -213,7 +192,7 @@ async def start_cmd(
         embed_sender_task.start()
 
     await interaction.response.send_message(
-        "✅ Trade embed generator started! Webhook and custom server emojis updated.",
+        "✅ Trade embed generator started!",
         ephemeral=True
     )
 
@@ -224,16 +203,16 @@ async def stop_cmd(interaction: discord.Interaction):
         embed_sender_task.stop()
 
     await interaction.response.send_message(
-        "🛑 Trade embed generator has been stopped.",
+        "🛑 Trade embed generator stopped.",
         ephemeral=True
     )
 
 # ==========================================
-# 5. BOT EXECUTION
+# 4. BOT EXECUTION
 # ==========================================
 if __name__ == "__main__":
     TOKEN = os.getenv("DISCORD_TOKEN")
     if TOKEN:
         bot.run(TOKEN)
     else:
-        print("Error: DISCORD_TOKEN environment variable not set.")
+        print("Error: DISCORD_TOKEN environment variable is not set.")
