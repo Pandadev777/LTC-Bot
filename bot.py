@@ -168,7 +168,7 @@ async def embed_sender_loop():
             if bot_state["webhook_url"]:
                 async with aiohttp.ClientSession() as session:
                     webhook = discord.Webhook.from_url(bot_state["webhook_url"], session=session)
-                    await webhook.send(embed=embed, username="Trade Bot")
+                    await webhook.send(embed=embed, username="Trade World Vouch Assistant")
             else:
                 await channel.send(embed=embed)
         except Exception as e:
